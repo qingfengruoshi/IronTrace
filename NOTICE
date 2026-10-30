@@ -1,0 +1,16 @@
+PD210 / PD245 V3 firmware — notices
+
+Code
+  All firmware code in this repository was written by qingfengruoshi and
+  contributors. It is licensed under GPL-3.0-or-later. See LICENSE and
+  LICENSING.md.
+
+Fonts
+  - VonwaonBitmap 16px (凤凰点阵体 16px), Copyright (c) 2021 Haoyu Qiu.
+    License: CC0 1.0 Universal (Public Domain Dedication).
+    Used by v311+ Chinese glyphs.
+  - Source Han Sans, Copyright 2014-2021 Adobe.
+    License: SIL Open Font License 1.1; see LICENSE-OFL.txt.
+    Used by historical releases before v309.
+
+No font file is embedded; only 16x16 1-bit glyph masks used by this firmware.

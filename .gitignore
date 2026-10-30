@@ -1,0 +1,29 @@
+# Build outputs
+build/
+dist/
+out/
+*.bin
+*.elf
+*.map
+*.o
+*.hex
+
+# Python cache / env
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# Local debug, logs, previews, captures
+_*
+*.log
+*.csv
+*.zip
+*.png
+*.jpg
+*.jpeg
+
+# Editor
+.idea/
+.vscode/

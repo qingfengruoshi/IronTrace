@@ -1,0 +1,29 @@
+/* ============================================================================
+ * stm32l431.ld — 向量表在 startup.c 里定义（.isr_vector 段），这里用 KEEP 锁死。
+ * ★ 不要再把向量表写在脚本 LONG() 里：--gc-sections 会回收 Default_Handler /
+ *   SysTick_Handler，符号解析成 0（2026-10-06 实锤）。
+ * ==========================================================================*/
+ENTRY(Reset_Handler)
+
+MEMORY
+{
+    FLASH (rx)  : ORIGIN = 0x08000000, LENGTH = 256K
+    SRAM  (rwx) : ORIGIN = 0x20000000, LENGTH = 64K
+    CCM   (rwx) : ORIGIN = 0x10000000, LENGTH = 16K
+}
+
+_estack = ORIGIN(SRAM) + LENGTH(SRAM);
+
+SECTIONS
+{
+    .text 0x08000000 : {
+        KEEP(*(.isr_vector))      /* 向量表：48 项 × 4B，GC 不可触碰 */
+        *(.text*)
+        *(.rodata*)
+        . = ALIGN(4);
+    } > FLASH
+
+    _sidata = LOADADDR(.data);
+    .data : { _sdata = .; *(.data*) . = ALIGN(4); _edata = .; } > SRAM AT> FLASH
+    .bss  (NOLOAD) : { _sbss = .; *(.bss*) *(COMMON) . = ALIGN(4); _ebss = .; } > SRAM
+}
