@@ -243,6 +243,7 @@ volatile uint8_t sleep_mode = 1;    /* 0=关 1=运动 2=磁吸(PA15 低有效) *
 
 /* ---- SET 配置（v148, RAM 暂存） ---- */
 static uint32_t save_at = 0;
+static uint8_t settings_key_dirty = 0;   /* ★ v331: 左右键改过设置，松手立即落盘 */
 volatile uint8_t ui_dirty = 1;
 volatile int  duty_now = 0;
 static float  pid_i = 0, last_err = 0;
@@ -301,7 +302,8 @@ static uint8_t cfg_logi = 0;
 static uint8_t cfg_boot_anim = 1;
 static uint8_t cfg_boot_heat = 0;
 volatile uint8_t fly_enable = 0;      /* 黑匣子模式，SET 开关，默认关 */
-static uint8_t fly_sel = 0;           /* ★ v271: 编辑光标 0=关 1=开 2=清空 */
+static uint8_t fly_dur = 0;           /* ★ v332: 0=61S(1024点) 1=123S(2048点) */
+static uint8_t fly_sel = 0;           /* ★ v332: 编辑光标 0=关 1=61S 2=123S 3=清空 */
 /* ★ v248: PID 参数（settings_save_now 在此之后使用，故提前声明） */
 static float pid_kp = 2.0f, pid_ki = 0.010f, pid_kd = 1.0f;
 /* ★ v254: PID 页/存盘改回我们自己调的这组：2.00 / 0.010 / 1.00
@@ -314,9 +316,14 @@ static void    settings_dirty(void);   /* ★ v210: 前向声明 */
 /* ★ v275: 黑匣子关/开只在退出编辑时提交，避免经过“开”去“清空”时把状态改掉 */
 static void fly_commit(void)
 {
-    if (fly_sel < 2 && fly_enable != fly_sel) {
-        fly_enable = fly_sel;
-        settings_dirty();
+    if (fly_sel < 3) {
+        uint8_t en = (uint8_t)(fly_sel != 0);
+        uint8_t dur = (uint8_t)(fly_sel == 2);
+        if (fly_enable != en || fly_dur != dur) {
+            fly_enable = en;
+            fly_dur = dur;
+            settings_dirty();
+        }
     }
 }
 static int     set_sel = 0;
@@ -344,6 +351,9 @@ static uint8_t  ui_slide = 0;             /* 0=无 1=前进(右入) 2=后退(左
 static uint8_t  ui_slide_ready = 0;       /* 目标页已画进 fb，转场中不再重画 */
 static int ui_slide_pm = 0;
 static uint32_t ui_anim_t0 = 0;
+static uint8_t  ui_slide_boot = 0;        /* 开机收尾：等主循环稳定后再启动 */
+static uint8_t  ui_slide_stable = 0;
+static uint32_t ui_slide_last = 0;
 /* ★ v291: A 方案「拉伸连接」—— 选中块前缘先走、后缘延迟，旧格到新格拉出一条
  *   连续的拉伸带，再用后缘收进新格。80ms；后缘 10ms 后用 ease-out 快速追上。 */
 #define UI_STRETCH_MS    80u
@@ -394,6 +404,7 @@ static uint32_t g_btn_hold = 0;           /* 中心键按住时长(ms) */
 static uint8_t  pdo_apply_ok = 0;         /* v225: 应用成功后满条+OK保持到松手 */
 /* ★ v218: 全部按 6ms tick 计（24MHz 下 SysTick 仍 6ms） */
 #define UI_SLIDE_TICKS  60u   /* v320: ~360ms APEX 斜切擦除，配 12ms 帧 */
+#define UI_SLIDE_MAX_STEP 80  /* 单帧最多推进 8%，防止初始化阻塞时跳帧/跳终帧 */
 #define UI_FAST_TICKS    1u   /* 动画期每 tick 尝试出一帧 */
 #define UI_SLIDE_FRAME_TICKS 2u /* 整屏斜切 12.8KB@12MHz≈8.5ms，留到 12ms 一帧 */
 #define SET_N        12
@@ -462,7 +473,7 @@ static void set_step(int d)
     case 7: cfg_motion_th += (d > 0) ? 5 : -5; if (cfg_motion_th < 5) cfg_motion_th = 5; if (cfg_motion_th > 100) cfg_motion_th = 100; break;
     case 8: cfg_boot_anim = cfg_boot_anim ? 0 : 1; break;
     case 9: cfg_boot_heat = cfg_boot_heat ? 0 : 1; break;
-    case 10: fly_sel = (uint8_t)((fly_sel + (d > 0 ? 1 : 2)) % 3); break;   /* 退出编辑时提交 */
+    case 10: fly_sel = (uint8_t)((fly_sel + (d > 0 ? 1 : 3)) % 4); break;   /* 退出编辑时提交 */
     case 11: cfg_preset[preset_edit_i] += (d > 0) ? 5 : -5;
              if (cfg_preset[preset_edit_i] < TEMP_MIN_C) cfg_preset[preset_edit_i] = TEMP_MIN_C;
              if (cfg_preset[preset_edit_i] > TEMP_MAX_C) cfg_preset[preset_edit_i] = TEMP_MAX_C;
@@ -566,6 +577,7 @@ static uint8_t settings_save_now(void)
               | ((uint32_t)cfg_pause_s & 0xFFu) << 8
               | ((uint32_t)cfg_sleep_min & 0xFFu) << 16
               | ((uint32_t)cfg_theme & 3u) << 24
+              | ((uint32_t)fly_dur & 1u) << 29
               | (1u << 26) | (1u << 27) | (1u << 28);   /* v233: 默认值迁移已完成 */
     st.preset01 = ((uint32_t)cfg_preset[0] & 0xFFFFu) | ((uint32_t)cfg_preset[1] & 0xFFFFu) << 16;
     st.preset2 = (uint32_t)cfg_preset[2] & 0xFFFFu;
@@ -582,7 +594,7 @@ static uint8_t settings_save_now(void)
                | ((st.col01 ^ st.col23 ^ st.col45) & 0xFFFFu);
     return flash_settings_write(&st);
 }
-static void settings_dirty(void) { save_at = millis() + 333u; }   /* 2s 去抖 */
+static void settings_dirty(void) { save_at = millis() + 333u; settings_key_dirty = 1; }   /* 2s 兜底；松手会立即保存 */
 
 /* ★ v216: RST 页恢复出厂默认 */
 static void settings_defaults(void)
@@ -602,6 +614,7 @@ static void settings_defaults(void)
     cfg_boot_anim = 1;
     cfg_boot_heat = 0;
     fly_enable = 0;
+    fly_dur = 0;
     cfg_preset[0] = 320; cfg_preset[1] = 350; cfg_preset[2] = 380;
     preset_idx = 0;
     pid_set_defaults();
@@ -648,7 +661,6 @@ static void ui_go(int np, int dir)
         }
         col_sel = 0; col_edit = 0; col_ch = 0;
     }
-    lcd_save_frame();
     page = np;
     bc_hold_hint = 0;
     /* v329: 入场先不画红色选中格，落位后再点亮；方向保持与其他页一致 */
@@ -659,6 +671,7 @@ static void ui_go(int np, int dir)
     ui_slide = (uint8_t)(dir < 0 ? 2 : 1);
     ui_slide_ready = 0;
     ui_slide_pm = 0;
+    ui_slide_boot = 0;
     ui_anim_t0 = millis();
     ui_dirty = 1;
 }
@@ -795,14 +808,47 @@ static int pid_step(uint16_t raw)
     return (int)u;
 }
 
-/* ---- 黑匣子（v126/v132） ---- */
-#define FLY_N 1024
+/* ---- 黑匣子（v332: 60ms/1024/2048，6 页，FULL 自动停热） ---- */
+/* SRAM2 在 0x2000C000 有别名：栈必须留在 SRAM1，见 stm32l431.ld */
+#define FLY_N 2048
 #define FLY_T ((volatile uint16_t*)0x10001000)
-#define FLY_D ((volatile uint16_t*)0x10001800)
-#define FLY_R ((volatile uint16_t*)0x10002000)
+#define FLY_D ((volatile uint16_t*)0x10002000)
+#define FLY_R ((volatile uint16_t*)0x10003000)
+#define FLY_LEN() ((uint16_t)(fly_dur ? FLY_N : 1024))
 volatile uint16_t fly_i = 0;
 static uint32_t fly_clear_t0 = 0;
 static uint8_t  fly_clear_ok = 0;
+static uint32_t fly_full_t0 = 0;
+static uint64_t fly_last_crc64 = 0;
+static uint8_t  fly_last_id_ok = 0;
+static const char FW_TAG[4] = { 'V', '3', '3', '6' };
+
+static void fly_meta_fill(fly_meta_t *m)
+{
+    uint8_t *p = (uint8_t *)m;
+    for (uint32_t i = 0; i < sizeof(*m); i++) p[i] = 0;
+    for (int i = 0; i < 4; i++) m->fw_tag[i] = FW_TAG[i];
+    const volatile uint8_t *uid = (const volatile uint8_t *)0x1FFF7590u;
+    for (int i = 0; i < 12; i++) m->uid[i] = uid[i];
+    m->target_c = (int16_t)target_c;
+    m->limit_pct = (uint8_t)limit_pct;
+    m->pdo_gear = (uint8_t)pdo_gear;
+    m->pid_p100 = (uint16_t)(pid_kp * 100.0f + 0.5f);
+    m->pid_i1000 = (uint16_t)(pid_ki * 1000.0f + 0.5f);
+    m->pid_d100 = (uint16_t)(pid_kd * 100.0f + 0.5f);
+}
+
+static void fly_save_now(void)
+{
+    if (!fly_enable || fly_i < 32) { fly_i = 0; return; }
+    fly_meta_t m;
+    fly_meta_fill(&m);
+    if (flash_fly_save(fly_i, FLY_T, FLY_D, FLY_R, &m)) {
+        fly_last_crc64 = m.crc64;
+        fly_last_id_ok = 1;
+    }
+    fly_i = 0;
+}
 
 /* ---- 显示防抖（v123） ---- */
 volatile int g_disp_temp = 25;
@@ -959,6 +1005,31 @@ static uint16_t temp_state_color(int t)
     return C_TMP;
 }
 
+static void hex4(char *p, uint16_t v)
+{
+    const char *h = "0123456789ABCDEF";
+    p[0] = h[(v >> 12) & 15];
+    p[1] = h[(v >> 8) & 15];
+    p[2] = h[(v >> 4) & 15];
+    p[3] = h[v & 15];
+}
+
+static void draw_bb_id(uint64_t crc)
+{
+    uint64_t id = crc & 0xFFFFFFFFFFFFull;   /* 48-bit display code */
+    char b[15];
+    hex4(b, (uint16_t)(id >> 32));
+    b[4] = '-';
+    hex4(b + 5, (uint16_t)(id >> 16));
+    b[9] = '-';
+    hex4(b + 10, (uint16_t)id);
+    b[14] = 0;
+    lcd_fill(0, 33, 160, 7, C_BG);
+    int w = 14 * 6 - 1;
+    int x = (160 - w) / 2;
+    lcd_text(x, 33, b, 0x04FF);
+}
+
 static void draw_main(float cur, int st)
 {
     char b[24], stb[8], lmb[8], rsb[10], vb[10], ib[12], pb[12], pc[8];
@@ -1061,9 +1132,32 @@ static void draw_main(float cur, int st)
         draw_degree(96, 16, tcol);
     }
 
-    draw_meter(2, 34, 124, 5, bar_pct, C_OK, C_TRACK);
-    mini_snprintf(pc, sizeof pc, "%d%%", bar_pct);
-    text_right(151, 33, pc, (asleep || no_tip) ? C_DIM2 : C_BONE);
+    if (fly_enable) {
+        if (!heat_on && fly_last_id_ok) {
+            /* ★ v335: 保存完成后底栏居中显示 12 位数据码，常驻到关闭/清空 */
+            draw_bb_id(fly_last_crc64);
+        } else {
+            /* ★ v332: 底栏录制进度，60ms/点；61S/123S 到 FULL 自动停热，FULL 停留 1s */
+            uint16_t fly_n = FLY_LEN();
+            uint16_t n = fly_i;
+            if (n > fly_n) n = fly_n;
+            int rp = (int)((uint32_t)n * 100u / fly_n);
+            int full = (n >= fly_n) || (fly_full_t0 && now - fly_full_t0 < 167u);
+            if (full) rp = 100;
+            draw_meter(2, 34, 124, 5, rp, 0x04FF, C_TRACK);
+            if (full) {
+                mini_snprintf(pc, sizeof pc, "FULL");
+                text_right(151, 33, pc, 0x04FF);
+            } else {
+                mini_snprintf(pc, sizeof pc, "%ds", (int)((uint32_t)n * 6u / 100u));
+                text_right(151, 33, pc, C_BONE);
+            }
+        }
+    } else {
+        draw_meter(2, 34, 124, 5, bar_pct, C_OK, C_TRACK);
+        mini_snprintf(pc, sizeof pc, "%d%%", bar_pct);
+        text_right(151, 33, pc, (asleep || no_tip) ? C_DIM2 : C_BONE);
+    }
     dbg_idle = (uint16_t)((uint32_t)(millis() - last_activity_ms) * MS_PER_TICK / 1000u);
     (void)st;
 }
@@ -1337,12 +1431,10 @@ static void set_label(int i, int x, int y, uint16_t c)
     case 7:  a=11; b=5;  e=27; d=28; break;   /* 运动阈值 */
     case 8:  a=42; b=43; e=5;  d=34; break;   /* 开机动画 */
     case 9:  a=42; b=43; e=30; d=31; break;   /* 开机加热 */
-    case 10:                                  /* 黑匣子模式（5 字） */
+    case 10:                                  /* 黑匣子（v332 缩为 3 字，给 123S 让位） */
         draw_cn16(x, y, 86, c);
         draw_cn16(x + 16, y, 87, c);
         draw_cn16(x + 32, y, 88, c);
-        draw_cn16(x + 48, y, 89, c);
-        draw_cn16(x + 64, y, 37, c);
         return;
     default: a=32; b=33; e=44; d=1;  break;   /* 常用温度 */
     }
@@ -1432,13 +1524,20 @@ static void set_value(int i, int y, int sel, int edit, uint16_t fg)
         }
         lcd_text(152, y + 6, "C", fg);
         break;
-    case 10:
-        if (edit && sel)
-            if (fly_sel == 2) { draw_cn16_pair_right(146, y + 2, 92, 93, fg); }
-            else              draw_cn16_right(146, y + 2, fly_sel ? 29 : 14, fg);
-        else
-            draw_cn16_right(146, y + 2, fly_enable ? 29 : 14, fg);
+    case 10: {
+        uint8_t v = (edit && sel) ? fly_sel : (uint8_t)(fly_enable ? (fly_dur ? 2 : 1) : 0);
+        if (v == 3) {
+            draw_cn16_pair_right(146, y + 2, 92, 93, fg);
+        } else if (v == 0) {
+            draw_cn16_right(146, y + 2, 14, fg);
+        } else {
+            char b[8];
+            mini_snprintf(b, sizeof b, "%d", v == 2 ? 123 : 61);
+            text_big_right(136, y + 3, b, fg, 2);
+            draw_time_unit(141, y + 7, 0, fg);
+        }
         break;
+    }
     default: break;
     }
 }
@@ -1477,7 +1576,7 @@ static int set_edit_ax(int i)
     case 8: case 9:
         return 122;
     case 10:
-        return (fly_sel == 2) ? 106 : 122;
+        return 84;   /* v332: 给 123S 留出值区 */
     default:
         return 84;
     }
@@ -1512,17 +1611,19 @@ static void draw_set(void)
         lcd_text_big(4, y + 3, b, edit ? C_BG : (cov ? C_OK : C_DIM2), 2);
         set_label(i, 30, y + 2, fg);
 
-        int clear_hold = (i == 10 && sel && set_edit && fly_sel == 2 &&
+        int clear_hold = (i == 10 && sel && set_edit && fly_sel == 3 &&
                           btn_centre() && g_btn_hold > 0 && !clear_done);
         int show_done = (i == 10 && clear_done);
-        int show_hint = (i == 10 && sel && set_edit && fly_sel == 2 && !clear_done);
+        int show_hint = (i == 10 && sel && set_edit && fly_sel == 3 && !clear_done);
         if (show_done) {
-            uint16_t dc = fly_clear_ok ? C_OK : C_BAD;
-            if (fly_clear_ok) { draw_cn16(120, y + 2, 94, dc); draw_cn16(136, y + 2, 92, dc); }
-            else              { draw_cn16(120, y + 2, 95, dc); draw_cn16(136, y + 2, 96, dc); }
+            /* v330: 编辑行是 C_OK 底色，成功提示不能用 C_OK，否则看不见 */
+            uint16_t dc = set_edit ? C_BG : (fly_clear_ok ? C_OK : C_BAD);
+            if (fly_clear_ok) { draw_cn16(120, y + 2, 94, dc); draw_cn16(136, y + 2, 92, dc); }  /* 已清 */
+            else              { draw_cn16(120, y + 2, 95, dc); draw_cn16(136, y + 2, 96, dc); }  /* 失败 */
         } else if (show_hint) {
-            draw_cn16(120, y + 2, 90, fg);
-            draw_cn16(136, y + 2, 91, fg);
+            /* v330: 只显示大字“清空”；长按清空的操作说明写进说明书 */
+            draw_cn16(120, y + 2, 92, fg);   /* 清 */
+            draw_cn16(136, y + 2, 93, fg);   /* 空 */
             if (clear_hold) {
                 int p = (int)((uint32_t)g_btn_hold * 100u / LONG_PRESS_MS);
                 if (p > 100) p = 100;
@@ -1733,7 +1834,7 @@ static void draw_info(void)
     lcd_fill(80, 0, 1, 40, C_TRACK);
 
     lcd_text(4, 3, "MODEL", C_DIM);  text_right(76, 3, "PD210", C_BONE);
-    lcd_text(4, 16, "VER", C_DIM);   text_right(76, 16, "V329", C_BONE);
+    lcd_text(4, 16, "VER", C_DIM);   text_right(76, 16, "V336", C_BONE);
     lcd_text(4, 29, "DEV", C_DIM);   text_right(76, 29, "Alex", C_BONE);
     lcd_text(84, 3, "UPD", C_DIM);   text_right(158, 3, "26-10-24", C_BONE);
     lcd_text(84, 16, "ID", C_DIM);
@@ -1978,11 +2079,35 @@ static void ui_present(void)
     lcd_dim_pct(pct);
     uint32_t now = millis();
     if (ui_slide) {
+        if (ui_slide_boot) {
+            uint32_t gap = now - ui_slide_last;
+            ui_slide_last = now;
+            if (gap <= UI_SLIDE_FRAME_TICKS + 2u) {
+                if (ui_slide_stable < 3u) ui_slide_stable++;
+            } else {
+                ui_slide_stable = 0;
+            }
+            if (ui_slide_stable < 3u) {
+                ui_anim_t0 = now;   /* 初始化还没收尾，先保持 READY 不推进 */
+                return;
+            }
+            ui_slide_boot = 0;      /* 主循环已连续稳定出帧，正式开始斜切 */
+            ui_anim_t0 = now;
+        }
         uint32_t el = now - ui_anim_t0;
-        if (el >= UI_SLIDE_TICKS) {
+        int e = (el >= UI_SLIDE_TICKS) ? 1000 : ease_out_pm(el, UI_SLIDE_TICKS);
+        /* 开机阶段主循环可能被 PD/传感器初始化卡住；限制单帧步进，
+         * 避免 el 一次跨过整段动画，只显示两帧就跳到主界面。 */
+        if (e > ui_slide_pm + UI_SLIDE_MAX_STEP) e = ui_slide_pm + UI_SLIDE_MAX_STEP;
+        if (e > 1000) e = 1000;
+        if (e > ui_slide_pm) lcd_wipe_strip(ui_slide == 2 ? -1 : 1, ui_slide_pm, e);
+        ui_slide_pm = e;
+        if (e >= 1000) {
             ui_slide = 0;
             ui_slide_ready = 0;
             ui_slide_pm = 0;
+            ui_slide_boot = 0;
+            ui_slide_stable = 0;
             if (page == 1 && pdo_hl_pending) {
                 pdo_hl_pending = 0;
                 pdo_hl_hold = 0;
@@ -1992,10 +2117,6 @@ static void ui_present(void)
                 ui_dirty = 1;
             }
             lcd_flush();
-        } else {
-            int e = ease_out_pm(el, UI_SLIDE_TICKS);
-            if (e > ui_slide_pm) lcd_wipe_strip(ui_slide == 2 ? -1 : 1, ui_slide_pm, e);
-            ui_slide_pm = e;
         }
         return;
     }
@@ -2297,6 +2418,7 @@ int main(void)
                 cfg_boot_heat = (uint8_t)((ld.misc_a >> 13) & 1u);
                 cfg_boot_anim = (uint8_t)((ld.misc_a >> 14) & 1u);
                 fly_enable    = (uint8_t)((ld.misc_a >> 15) & 1u);
+                fly_dur       = (uint8_t)((ld.misc_b >> 29) & 1u);
                 cfg_motion_th = (int)((ld.misc_a >> 16) & 0xFFu);   if (cfg_motion_th < 5 || cfg_motion_th > 100) cfg_motion_th = 30;
                 cfg_idle_s    = (uint8_t)(ld.misc_b & 0xFFu);       if (cfg_idle_s < 1 || cfg_idle_s > 250) cfg_idle_s = 30;
                 cfg_pause_s   = (uint8_t)((ld.misc_b >> 8) & 0xFFu);  if (cfg_pause_s < 1 || cfg_pause_s > 250) cfg_pause_s = 30;
@@ -2357,6 +2479,13 @@ int main(void)
             }
             if (cfg_theme == 3 && !col_ok) cfg_theme = 0;
             apply_theme();
+        }
+    }
+    {
+        fly_meta_t bm;
+        if (flash_meta_load(&bm)) {
+            fly_last_crc64 = bm.crc64;
+            fly_last_id_ok = 1;
         }
     }
     if (cfg_migrated) save_ok = settings_save_now();   /* 持久化迁移标记 */
@@ -2480,9 +2609,10 @@ int main(void)
                     if (np == 12) { set_edit = 0; preset_edit_i = 0; }
                     ui_go(np, 1); bc_t0 = 0;
                 } else if (page == 12) {
-                    if (set_edit && set_sel == 10 && fly_sel == 2) {
+                    if (set_edit && set_sel == 10 && fly_sel == 3) {
                         fly_clear_ok = flash_fly_clear();
                         fly_i = 0;
+                        if (fly_clear_ok) { fly_last_id_ok = 0; fly_last_crc64 = 0; }
                         fly_clear_t0 = now;
                         ui_dirty = 1;
                     } else {
@@ -2495,7 +2625,7 @@ int main(void)
                             set_pos_from = set_pos_to = (int16_t)(set_sel * 1000);
                             set_view_from = set_view_to = (int16_t)(set_view_of(set_sel) * 1000);
                         }
-                        if (entering && set_sel == 10) fly_sel = fly_enable ? 1 : 0;
+                        if (entering && set_sel == 10) fly_sel = (uint8_t)(fly_enable ? (fly_dur ? 2 : 1) : 0);
                         if (set_edit && set_sel == 11) preset_edit_i = 0;
                     }
                     bc_t0 = 0;
@@ -2588,6 +2718,15 @@ int main(void)
             if (page == 1 && bl && br && !bl_prev && !br_prev) {
                 lcd_set_orientation(lcd_get_orientation() + 1); ui_dirty = 1;   /* 鏂瑰悜 O0-O7 寰幆 */
             }
+            /* ★ v331: 改过设置后松手就落盘，避免 2s 内断电丢最后一项 */
+            if ((!bl && bl_prev) || (!br && br_prev)) {
+                if (settings_key_dirty) {
+                    settings_key_dirty = 0;
+                    save_at = 0;
+                    save_ok = settings_save_now();
+                    ui_dirty = 1;
+                }
+            }
             bl_prev = bl; br_prev = br; bc_prev = bc;
         }
 
@@ -2610,8 +2749,18 @@ int main(void)
                 /* 背光保持熄灭，等下面的加速度计重试给出方向 */
             } else {
                 if (cfg_bright < 100) lcd_dim_pct(cfg_bright);   /* 首帧就按保存亮度显示 */
-                if (cfg_boot_anim) lcd_boot_reveal(45);
-                else { lcd_flush(); lcd_backlight_on(); }   /* 无动画：先把主界面送 GRAM 再开背光 */
+                if (cfg_boot_anim) {
+                    lcd_boot_reveal();
+                    /* READY 留在 GRAM 作为旧画面；fb 重画主界面后从黑底斜切进入 */
+                    draw_main(25.0f, 0);
+                    ui_slide = 1;
+                    ui_slide_ready = 1;
+                    ui_slide_pm = 0;
+                    ui_slide_boot = 1;
+                    ui_slide_stable = 0;
+                    ui_slide_last = millis();
+                    ui_anim_t0 = millis();
+                } else { lcd_flush(); lcd_backlight_on(); }   /* 无动画：先把主界面送 GRAM 再开背光 */
                 boot_bl_on = 1;
                 ui_dirty = 1;
             }
@@ -2704,7 +2853,7 @@ int main(void)
                                     uint32_t iv = (uint32_t)(now - last_activity_ms) * MS_PER_TICK;
                                     dbg_idle = (uint16_t)(iv / 1000u);
                                     if (dbg_idle != last_idle_shown) { last_idle_shown = (int)dbg_idle; ui_dirty = 1; }
-                                    if (iv >= (uint32_t)cfg_idle_s * 1000u) {
+                                    if (!fly_enable && iv >= (uint32_t)cfg_idle_s * 1000u) {
                                         asleep = 1; idle_cnt = 0; motion_run = 0; activity_run = 0;
                                         sleep_guard_t0 = now;
                                     }
@@ -2713,7 +2862,7 @@ int main(void)
                                     motion_run = 0;
                                     if (hall_active()) {
                                         if (hall_on_n < 3) hall_on_n++;
-                                        if (hall_on_n >= 3) {
+                                        if (!fly_enable && hall_on_n >= 3) {
                                             asleep = 1; idle_cnt = 0; motion_run = 0; activity_run = 0;
                                             sleep_guard_t0 = now;
                                             heat_on = 0; tip_paused = 0;
@@ -2805,6 +2954,13 @@ int main(void)
             ui_dirty = 1;
         }
 
+        /* ★ v332: 停止加热时自动把黑匣子落盘，避免拔热头/断电丢失 */
+        {
+            static uint8_t fly_heat_prev = 0;
+            if (fly_heat_prev && !heat_on) fly_save_now();
+            fly_heat_prev = heat_on;
+        }
+
         /* 娓╂帶 20Hz (v21: vin_raw 涔熷湪姝ら噰鏍? V 琛?50ms 鍐呮洿鏂? */
         if (now - last_ctrl >= 10) {
             last_ctrl = now;
@@ -2853,7 +3009,7 @@ int main(void)
                     dev_state = DS_NO_TIP; duty_now = 0; pid_i = 0; last_err = 0;
                     tip_r_dmR = 0xFFFF; rs_latched = 0;   /* ★ v273: 拔头清空内阻，下次插入重测 */
                     /* ★ v126: 拔头瞬间把黑匣子落盘 — PWLink 插拔会断电，SRAM2 会丢 */
-                    if (fly_enable && fly_i >= 32) { flash_fly_save(fly_i, FLY_T, FLY_D, FLY_R); fly_i = 0; }
+                    fly_save_now();
                 }
             } else if (dev_state == DS_NO_TIP) {
                 /* ★ v260: 上电 ADC 未稳定（t_zero 前）不判插头；
@@ -2864,6 +3020,11 @@ int main(void)
                 }
             } else {
                 tip_present_cnt = 0;
+            }
+            /* ★ v333: 黑匣子开启期间不休眠；已睡下则立即唤醒（不改 sleep_mode，关掉后恢复原休眠档） */
+            if (fly_enable && asleep) {
+                asleep = 0; idle_cnt = 0; motion_run = 0;
+                ui_dirty = 1;
             }
             /* ★ v234: 无烙铁头也能休眠；睡下后拔头检测不要把它拉回 NO_TIP */
             /* ★ v250: 兜底 —— 醒着却停留在 SLEEP/STANDBY/DEEP 属非法状态，强拉回 READY；
@@ -2944,18 +3105,6 @@ int main(void)
                     }
                 }
             }
-            /* ★ v132: 飞行记录 — 10Hz 降采样，受 fly_enable 控制（默认关，不占运行开销） */
-            if (fly_enable) {
-                static uint8_t fly_div = 0;
-                if (++fly_div >= 10) {
-                    fly_div = 0;
-                    uint16_t fidx = fly_i & (FLY_N - 1);
-                    FLY_R[fidx] = t_raw;
-                    FLY_T[fidx] = (uint16_t)cur;
-                    FLY_D[fidx] = duty_now;
-                    fly_i++;
-                }
-            }
             if (dbg_win_mode == 2) { duty_now = dbg_win_fix; }   /* ★ v87: 诊断强制占空比 */
             else if (heat_on && dev_state == DS_READY && !tip_paused && pd_att && t_raw < OVERTEMP_RAW && iout_raw < OVERI_RAW) {
                 int d = pid_step(t_raw);          /* ★ v107: 设计基线 PID, 返回 0-100% */
@@ -2966,6 +3115,22 @@ int main(void)
             }
             if (dbg_win_mode == 2) duty_now = dbg_win_fix;
             pwm_set(duty_now);
+            /* ★ v332: 飞行记录 — 每个控制拍(60ms)一个点，只在加热中记录；
+             * 到 FULL 自动停热，下一拍 save-on-stop 落盘 */
+            if (fly_enable && heat_on) {
+                uint16_t fly_n = FLY_LEN();
+                if (fly_i < fly_n) {
+                    uint16_t fidx = fly_i & (FLY_N - 1);
+                    FLY_R[fidx] = t_raw;
+                    FLY_T[fidx] = (uint16_t)cur;
+                    FLY_D[fidx] = duty_now;
+                    fly_i++;
+                }
+                if (fly_i >= fly_n) {
+                    heat_on = 0; tip_paused = 0; duty_now = 0; pwm_set(0);
+                    fly_full_t0 = millis();
+                }
+            }
             /* ★ v233: 对齐设计基线 — 静置→休眠(黄)，暂停时间(s)→待机(蓝)，休眠时间(min)→深度 */
             {
                 static uint16_t div1s = 0;
@@ -2973,7 +3138,7 @@ int main(void)
                 if (++div1s >= 17) {           /* 控制环 10 tick(60ms) × 17 ≈ 1s */
                     div1s = 0;
                     /* v234: 主循环兜底休眠，避免传感器任务偶发卡住时永远不睡 */
-                    if (sleep_mode == 1 && !asleep &&
+                    if (sleep_mode == 1 && !asleep && !fly_enable &&
                         (uint32_t)(now - last_activity_ms) * MS_PER_TICK >= (uint32_t)cfg_idle_s * 1000u) {
                         asleep = 1; idle_cnt = 0; motion_run = 0; sleep_guard_t0 = now;
                     }

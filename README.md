@@ -1,11 +1,13 @@
-# PD210 / PD245 V3 固件仓库
+# IronTrace
+
+PD210 / PD245 V3 固件与黑匣子读取工具。
 
 同一仓库维护两款焊笔固件：
 
-| 产品 | 烙铁头 | 源码分支 | 当前版本 |
+| 产品 | 烙铁头 | 源码目录 | 当前版本 |
 |---|---|---|---|
-| PD210 | C210 | `pd210` | v336 |
-| PD245 V3 | JBC245 / C245 | `pd245` | v024 |
+| PD210 | C210 | `firmware/PD210` | v336 |
+| PD245 V3 | JBC245 / C245 | `firmware/PD245` | v024 |
 
 主控均为 STM32L431CCT6，160×40 RGB565 屏，三键操作；UI、菜单、设置、PDO、休眠等主体代码共用。
 
@@ -15,20 +17,21 @@
 
 > 尚未实机验证的项目（真实焊接负载、低电压 PDO 等）统一列在文末[“非阻塞尾巴”](#非阻塞尾巴不影响现有使用)，不影响现有功能。
 
-## 分支说明
+## 目录结构
 
-- `master`：**发布索引 + 操作说明**。维护 `MANUAL_CN.md`；不作为产品开发主线，也不接收产品分支的 merge。v329 源码仍在 git 历史中，可随时找回，不再单独放置快照目录。
-- `pd210`：PD210（C210）的独立开发分支，当前 v336。
-- `pd245`：PD245 V3（JBC245）的独立开发分支，当前 v024。
+- `firmware/PD210/`：PD210（C210）v336 源码；
+- `firmware/PD245/`：PD245 V3（JBC245）v024 源码；
+- `tools/blackbox_reader/`：只读黑匣子读取工具；
+- `README.md` / `MANUAL_CN.md`：仓库说明和完整操作说明。
 
-分支之间互不依赖：`pd210`、`pd245` 各自指向自己的提交，**删除 `master` 不会影响它们的编译和使用**。正式发布前建议先打 tag 作为不可移动的恢复点：
+两个固件目录独立构建、互不依赖。发布时 tag 打在 `master` 的发布提交上：
 
 ```bash
 git tag -a pd210-v336 -m "PD210 v336"
 git tag -a pd245-v024 -m "PD245 V3 v024"
 ```
 
-以后发布固件时，tag 打在产品分支上，不把两个产品 merge 进 `master`（两边根目录都是 `main.c`、`lcd.c`，会冲突）。
+Release 附件按型号区分；两个 tag 可以指向同一个 master 提交。
 
 ## 构建
 
@@ -38,17 +41,17 @@ git tag -a pd245-v024 -m "PD245 V3 v024"
 export PATH="/d/Storage/Code_Storage/Bin/toolchain/gcc-arm-none-eabi-10.3-2021.10/bin:$PATH"
 ```
 
-本地开发布局是 `PD_Bin\repo.git`（bare）+ `PD_Bin\master` / `PD_Bin\PD210` / `PD_Bin\PD245` 三个 worktree；`master` 只放文档和索引，**构建在对应产品 worktree 里做**：
+**构建在对应固件目录里做**：
 
 ```bash
-cd /d/Storage/Code_Storage/PD_Bin/PD210
+cd firmware/PD210
 make clean && make      # 输出 build/pd245_fw.bin（文件名沿用历史，内容是 PD210）
 
-cd /d/Storage/Code_Storage/PD_Bin/PD245
+cd firmware/PD245
 make clean && make      # 输出 build/pd245_fw.bin（内容是 PD245）
 ```
 
-> 从 GitHub clone 的用户：`git clone <仓库地址> PD_Bin` 后 `git checkout pd210` 或 `git checkout pd245`，在该目录 `make`。新工作区第一次构建建议先 `make clean`，避免用到仓库里旧 `build/` 产物。
+> 从 GitHub clone 的用户：`git clone <仓库地址> IronTrace`，进入 `firmware/PD210` 或 `firmware/PD245` 后 `make`。新工作区第一次构建建议先 `make clean`。
 
 烧录地址：`0x08000000`。
 
@@ -63,11 +66,11 @@ make clean && make      # 输出 build/pd245_fw.bin（内容是 PD245）
 - **简洁版** `pdNNN_vNNN_compact.bin`：代码 + 0xFF 补齐到 8 字节；不覆盖 `0x08018000` 启动图区。
 - **读取工具包** `BlackBoxReader_<日期>.zip`：包含 `blackbox_reader.py`、`run_gui.bat`、`requirements.txt`、`README.md`；两个 Release 可共用同一个包。
 
-tag 本身不能挂附件，需要基于 tag 创建 GitHub Release 后上传；同时让 tag 指向对应的产品分支提交。仓库不提交 `build/` 和 bin 产物。发布时可再附一份 `SHA256SUMS.txt`，方便核对下载文件。
+tag 本身不能挂附件，需要基于 tag 创建 GitHub Release 后上传；同时让 tag 指向 master 发布提交。仓库不提交 `build/` 和 bin 产物。发布时可再附一份 `SHA256SUMS.txt`，方便核对下载文件。
 
 ## 黑匣子读取工具
 
-`master/tools/blackbox_reader/` 是只读 PC 工具（PW Link + pyOCD）：
+`tools/blackbox_reader/` 是只读 PC 工具（PW Link + pyOCD）：
 
 - `run_gui.bat` 打开 GUI，可选落盘日志/实时缓冲/CSV；
 - 生成 CSV / JSON / PNG / 自包含 HTML，带目标、LM、峰值、末 20s、完整性检查；
@@ -84,14 +87,14 @@ tag 本身不能挂附件，需要基于 tag 创建 GitHub Release 后上传；�
 ## 下载源码
 
 ```bash
-git clone <仓库地址> PD_Bin
-cd PD_Bin
+git clone <仓库地址> IronTrace
+cd IronTrace
 
-git checkout pd210   # PD210 源码
-git checkout pd245   # PD245 源码
+# PD210 源码在 firmware/PD210
+# PD245 源码在 firmware/PD245
 ```
 
-GitHub 网页也可以直接切换分支后 `Code → Download ZIP`。
+GitHub 网页可直接 `Code → Download ZIP`。
 
 ## 非阻塞尾巴（不影响现有使用）
 
@@ -105,7 +108,7 @@ GitHub 网页也可以直接切换分支后 `Code → Download ZIP`。
 
 ## 当前状态（2026-10-30）
 
-### PD245 V3（`pd245` v024）
+### PD245 V3（`firmware/PD245` v024）
 
 - v024：翻页和开机收尾改为黑底 APEX 斜切，删除 `fb_prev` 整帧快照，bss 从 40.8 KB 降到 28.1 KB，栈余量约 20.4 KB；开机 READY 收尾等主循环稳定后再启动，避免初始化阶段掉帧。控温、休眠和黑匣子逻辑不变；新日志的元数据 FW 标记为 V024。**12 位码断电重启、关闭黑匣子恢复功率条已确认。**
 - v022：把栈从 SRAM2 别名区移回 SRAM1，修复 123S 写满时 R 缓冲区覆盖栈顶导致界面/按键卡死；同时黑匣子开启期间禁止休眠（不改休眠设置，关闭黑匣子后恢复）。v019 的 61S/PID/温度逻辑不变。
@@ -118,7 +121,7 @@ GitHub 网页也可以直接切换分支后 `Code → Download ZIP`。
 - v014 修 TEMP 采样（PWM 关断窗）；v015 修显示 199/299 卡顿；v017 修 SET 黑匣子“清空”提示；v018 设置改完松手立即落盘；v019 黑匣子增加 61S/123S 时长、FULL 自动停热、2048 点/6 页布局（SET 标签缩为“黑匣子”给 123S 让位）。
 - 200/300/400 三点实测：`200.0 ± 0.4` / `300.0 ± 0.8`（11.3 s 到温，峰值 302）/ `400.2 ± 1.2`（12.2 s 到温，峰值 403）；稳态 duty 3.0 / 4.8 / 7.7%。**同一套 PID 三点通过，PID 定稿。**
 
-### PD210（`pd210` v336）
+### PD210（`firmware/PD210` v336）
 
 - v336：与 PD245 v024 同步，翻页和开机收尾改为黑底 APEX 斜切，删除 `fb_prev` 整帧快照，bss 从 40.8 KB 降到 28.1 KB，栈余量约 20.4 KB；开机 READY 收尾等主循环稳定后再启动。控温、休眠和黑匣子逻辑不变；新日志的元数据 FW 标记为 V336。**12 位码断电重启、关闭黑匣子恢复功率条已确认。**
 - v329 UI 基线 + v330 主界面黑匣子录制进度条；v331 设置改完松手立即落盘；v332 黑匣子对齐 PD245 v019：60 ms/点、SET 第 10 项 关 / 61S / 123S / 清空、到 FULL 自动停热并落盘、固定 6 页/12 KB。

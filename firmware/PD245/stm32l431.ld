@@ -8,7 +8,11 @@ ENTRY(Reset_Handler)
 MEMORY
 {
     FLASH (rx)  : ORIGIN = 0x08000000, LENGTH = 256K
-    SRAM  (rwx) : ORIGIN = 0x20000000, LENGTH = 64K
+    /* STM32L431CCT6: SRAM1 = 48K @0x20000000; SRAM2 = 16K @0x10000000,
+     * 并在 0x2000C000..0x2000FFFF 有别名。黑匣子 T/D/R 占
+     * 0x10001000..0x10003FFF，栈必须留在 SRAM1 内 (顶 0x2000C000)；
+     * 否则 123S 写满时 R 会覆盖 0x2000FFxx 的栈顶 (v019 潜在卡死)。 */
+    SRAM  (rwx) : ORIGIN = 0x20000000, LENGTH = 48K
     CCM   (rwx) : ORIGIN = 0x10000000, LENGTH = 16K
 }
 

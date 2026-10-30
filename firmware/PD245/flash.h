@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 typedef struct {
-    uint32_t magic;      /* 0x50443234 "PD24" */
+    uint32_t magic;      /* 0x50443235 "PD25" */
     int32_t  target_c;
     int32_t  limit_pct;
     int32_t  pdo_gear;
@@ -33,10 +33,35 @@ typedef struct {
 
 uint8_t flash_settings_load(settings_t *s);              /* 1=有效 */
 uint8_t flash_settings_write(const settings_t *s);       /* 1=成功 (含自校验) */
-/* ★ v126: 黑匣子落盘 — 3 页 124/125/126 (0x0803E000..)，6KB */
+/* ★ v335: 黑匣子元数据页 120 (0x0803C000..0x0803C7FF) */
+#define FLY_META_MAGIC   0x4D455441u   /* "META" */
+#define FLY_META_VERSION 1u
+typedef struct {
+    uint32_t magic;        /* 0  FLY_META_MAGIC */
+    uint16_t version;      /* 4  FLY_META_VERSION */
+    uint16_t cnt;          /* 6  log count */
+    uint64_t crc64;        /* 8  CRC64/ECMA of LE32(cnt)+T+D+R */
+    uint32_t run_seq;      /* 16 save sequence */
+    char     fw_tag[4];    /* 20 "V335" / "V023" */
+    uint8_t  uid[12];      /* 24 STM32 96-bit UID */
+    int16_t  target_c;     /* 36 run target */
+    uint8_t  limit_pct;    /* 38 run LM */
+    uint8_t  pdo_gear;     /* 39 run PDO gear */
+    uint16_t pid_p100;     /* 40 PID P x100 */
+    uint16_t pid_i1000;    /* 42 PID I x1000 */
+    uint16_t pid_d100;     /* 44 PID D x100 */
+    uint16_t avg_vin_dv;   /* 46 reserved: average V x10 */
+    uint16_t avg_iout_ma;  /* 48 reserved: average I mA */
+    uint16_t avg_power_w10;/* 50 reserved: average P x10 */
+    uint32_t checksum;     /* 52 rotating-XOR of words 0..12 */
+} fly_meta_t;
+
+/* ★ v335: 黑匣子落盘 — 元数据页 120 + 数据页 121..126 */
 uint8_t flash_fly_save(uint16_t cnt,
                        const volatile uint16_t *t,
                        const volatile uint16_t *d,
-                       const volatile uint16_t *r);
-uint8_t flash_fly_clear(void);                            /* v269: 擦除 3 页黑匣子数据 */
+                       const volatile uint16_t *r,
+                       fly_meta_t *meta);
+uint8_t flash_meta_load(fly_meta_t *meta);                /* 1=有效 (元数据+日志头匹配) */
+uint8_t flash_fly_clear(void);                            /* v335: 擦除页 120..126 */
 #endif

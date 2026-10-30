@@ -21,8 +21,8 @@
 
 #define W 160
 #define H 40
+#define WIPE_OLD 0x0000           /* 黑底斜切：旧页一侧用黑色，不再保留上一帧 */
 static uint16_t fb[W * H];        /* UI 横屏帧缓冲 */
-static uint16_t fb_prev[W * H];   /* 翻页动画的上一帧快照 */
 static uint8_t  ram_b[W * H * 2]; /* SPI 流: 高字节在前 */
 static int lcd_rot180 = 0;                 /* 加速度计驱动的 180° 翻转 (UI 空间) */
 void lcd_set_rot180(int r) { lcd_rot180 = r; }
@@ -161,11 +161,6 @@ static void lcd_send_full(void)
     LCD_CS_HIGH();
 }
 
-void lcd_save_frame(void)
-{
-    for (int i = 0; i < W * H; i++) fb_prev[i] = fb[i];
-}
-
 static void boot_wait(uint32_t ticks)
 {
     uint32_t t = millis();
@@ -211,7 +206,7 @@ static void boot_frame(int pct, int scan_y, int phase, int flash, int custom)
         }
     }
     /* wordmark, revealed by the beam */
-    const char *wm="PD210";
+    const char *wm="PD245";
     for (int i=0;i<5;i++) {
         char ch[2]={wm[i],0};
         int lit = (scan_y < 0) || (scan_y >= 51+i*12+4);
@@ -232,11 +227,10 @@ static void boot_frame(int pct, int scan_y, int phase, int flash, int custom)
     pb[n]=0; lcd_text(156-(6*n-1),33,pb,pct>=100?c_white:c_dim);
 }
 
-/* ★ v227: 开机动画 —— 扫描线 + 分段进度 + 完成闪烁，再滑入主界面 */
-void lcd_boot_reveal(int frames)
+/* ★ v227: 开机动画 —— 扫描线 + 分段进度 + 完成闪烁；
+ * READY 收尾不再保留旧帧，交给 ui_slide 的黑底斜切接管。 */
+void lcd_boot_reveal(void)
 {
-    if (frames < 1) frames = 1;
-    for (int i = 0; i < W * H; i++) fb_prev[i] = fb[i];   /* prev = 主界面 */
     int custom = boot_custom_valid();
 
     boot_frame(0, 0, 0, 0, custom);
@@ -262,18 +256,6 @@ void lcd_boot_reveal(int frames)
     boot_frame(100, -1, 0, 0, custom);                     /* 稳定停留 READY */
     lcd_flush();
     boot_wait(50);                                         /* 约 300ms */
-
-    for (int i = 0; i < W * H; i++) {                      /* 交换：prev=启动画面, fb=主界面 */
-        uint16_t m = fb_prev[i], sp = fb[i];
-        fb_prev[i] = sp; fb[i] = m;
-    }
-    for (int k = 0; k <= frames; k++) {
-        uint32_t ft = millis();
-        uint32_t p = (uint32_t)k * 1000u / (uint32_t)frames;
-        int e = (int)(3u * p * p / 1000u - 2u * p * p * p / 1000000u);   /* smoothstep */
-        lcd_wipe_flush(1, e);
-        while (millis() - ft < 6u) { }                     /* v228: 滑入也放慢 */
-    }
 }
 
 void lcd_flush(void)
@@ -336,94 +318,16 @@ void lcd_flush_rect(int x, int y, int w, int h)
     LCD_CS_HIGH();
 }
 
-/* 翻页滑动：dir>0 旧页左移、新页从右入；dir<0 反向。pm=0..1000 为缓动进度 */
-void lcd_slide_flush(int dir, int pm)
-{
-    if (pm >= 1000) { lcd_flush(); return; }
-    int s = W * pm / 1000;
-    for (int x = 0; x < W; x++) {
-        int ux = lcd_rot180 ? (W - 1 - x) : x;
-        int sx = (dir > 0) ? ux + s : ux - s;
-        const uint16_t *src = fb_prev;
-        if (sx < 0)        { sx += W; src = fb; }
-        else if (sx >= W)  { sx -= W; src = fb; }
-        for (int y = 0; y < H; y++) {
-            int uy = lcd_rot180 ? y : (H - 1 - y);
-            uint16_t v = src[uy * W + sx];
-            int o = (x * H + y) * 2;
-            ram_b[o]     = (uint8_t)(v >> 8);
-            ram_b[o + 1] = (uint8_t)(v & 0xFF);
-        }
-    }
-    lcd_send_full();
-}
-
-/* APEX 斜切擦除：新页从 dir 方向推入，红色斜边在前 */
-void lcd_wipe_flush(int dir, int pm)
-{
-    if (pm >= 1000) { lcd_flush(); return; }
-    int b = (dir > 0) ? (W - W * pm / 1000) : (W * pm / 1000);
-    for (int x = 0; x < W; x++) {
-        int ux = lcd_rot180 ? (W - 1 - x) : x;
-        for (int y = 0; y < H; y++) {
-            int uy = lcd_rot180 ? y : (H - 1 - y);
-            int edge = b + (uy - 20) * 16 / 40;
-            int takeNew = (dir > 0) ? (ux >= edge) : (ux <= edge);
-            uint16_t v = takeNew ? fb[uy * W + ux] : fb_prev[uy * W + ux];
-            int d = ux - edge; if (d < 0) d = -d;
-            if (d <= 1) v = 0xFA2A;
-            int o = (x * H + y) * 2;
-            ram_b[o] = (uint8_t)(v >> 8);
-            ram_b[o + 1] = (uint8_t)(v & 0xFF);
-        }
-    }
-    lcd_send_full();
-}
-
-/* v322: 增量斜切擦除 —— 只发送相对上一帧新露出的斜向条带，避免整屏 12.8KB 传输 */
-void lcd_wipe_band(int dir, int pm_prev, int pm_cur)
-{
-    if (pm_cur <= pm_prev) return;
-    if (pm_cur > 1000) pm_cur = 1000;
-    if (pm_prev < 0) pm_prev = 0;
-    int b0 = (dir > 0) ? (W - W * pm_prev / 1000) : (W * pm_prev / 1000);
-    int b1 = (dir > 0) ? (W - W * pm_cur / 1000) : (W * pm_cur / 1000);
-    for (int uy = 0; uy < H; uy++) {
-        int e0 = b0 + (uy - 20) * 16 / 40;
-        int e1 = b1 + (uy - 20) * 16 / 40;
-        int x0, x1;
-        if (dir > 0) { x0 = e1; x1 = e0 - 1; }
-        else         { x0 = e0 + 1; x1 = e1; }
-        if (x0 < 0) x0 = 0;
-        if (x1 >= W) x1 = W - 1;
-        if (x1 >= x0) lcd_flush_rect(x0, uy, x1 - x0 + 1, 1);
-
-        /* v323: 在当前斜边补 2px 红色光束，遮住新旧页交界；临时改 fb 后恢复 */
-        int be = e1;
-        if (be >= 0 && be < W) {
-            int bw = (be + 1 < W) ? 2 : 1;
-            uint16_t s0 = fb[uy * W + be];
-            uint16_t s1 = (bw > 1) ? fb[uy * W + be + 1] : 0;
-            fb[uy * W + be] = 0xFA2A;
-            if (bw > 1) fb[uy * W + be + 1] = 0xFA2A;
-            lcd_flush_rect(be, uy, bw, 1);
-            fb[uy * W + be] = s0;
-            if (bw > 1) fb[uy * W + be + 1] = s1;
-        }
-    }
-}
-
-/* v326: 增量斜切 —— 每帧只发一条竖直条带，条带内按斜边合成新旧页。
+/* v326: 增量斜切 —— 每帧只发一条竖直条带，条带内按斜边合成新页/黑底。
  * 相比逐行窗口，每帧只有一个 RAMWR 窗口，避免局部刷新撕裂/花屏。 */
 void lcd_wipe_strip(int dir, int pm_prev, int pm_cur)
 {
     if (pm_cur <= pm_prev) return;
     if (pm_cur > 1000) pm_cur = 1000;
     if (pm_prev < 0) pm_prev = 0;
-    int b0 = (dir > 0) ? (W - W * pm_prev / 1000) : (W * pm_prev / 1000);
     int b1 = (dir > 0) ? (W - W * pm_cur / 1000) : (W * pm_cur / 1000);
     int x0, x1;
-    /* 发送当前斜边到屏幕边缘的整个新侧矩形，内部逐像素合成旧/新页；
+    /* 发送当前斜边到屏幕边缘的整个新侧矩形，内部逐像素合成新页/黑底；
      * 避免逐行窗口造成撕裂，也比整屏少传一部分。 */
     if (dir > 0) { x0 = b1 - 8; x1 = W - 1; }
     else         { x0 = 0;      x1 = b1 + 7; }
@@ -452,7 +356,7 @@ void lcd_wipe_strip(int dir, int pm_prev, int pm_cur)
             int uy = lcd_rot180 ? dc : (H - 1 - dc);
             edge = b1 + (uy - 20) * 16 / 40;
             int takeNew = (dir > 0) ? (ux >= edge) : (ux <= edge);
-            uint16_t v = takeNew ? fb[uy * W + ux] : fb_prev[uy * W + ux];
+            uint16_t v = takeNew ? fb[uy * W + ux] : (uint16_t)WIPE_OLD;
             int d = ux - edge; if (d < 0) d = -d;
             if (d <= 1) v = 0xFA2A;
             ram_b[o++] = (uint8_t)(v >> 8);
