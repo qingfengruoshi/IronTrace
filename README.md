@@ -29,9 +29,10 @@ PD210 / PD245 V3 固件与黑匣子读取工具。
 ```bash
 git tag -a pd210-v336 -m "PD210 v336"
 git tag -a pd245-v024 -m "PD245 V3 v024"
+git tag -a release-2026-10-30 -m "IronTrace 2026-10-30"
 ```
 
-Release 附件按型号区分；两个 tag 可以指向同一个 master 提交。
+统一 Release 使用 `release-2026-10-30`，一个页面包含两款固件和读取工具；`pd210-v336` / `pd245-v024` 保留为版本 tag。
 
 ## 构建
 
@@ -57,14 +58,13 @@ make clean && make      # 输出 build/pd245_fw.bin（内容是 PD245）
 
 ## 发布文件
 
-| Release（tag） | 固件附件 | 工具附件 |
-|---|---|---|
-| PD210 v336（`pd210-v336`） | `pd210_v336.bin`（全版）、`pd210_v336_compact.bin`（简洁版） | `BlackBoxReader_<日期>.zip` |
-| PD245 V3 v024（`pd245-v024`） | `pd245_v024.bin`（全版）、`pd245_v024_compact.bin`（简洁版） | 同一个工具包 |
+| Release（tag） | 附件 |
+|---|---|
+| IronTrace 2026-10-30（`release-2026-10-30`） | PD210 v336 全版/简洁版、PD245 V3 v024 全版/简洁版、`BlackBoxReader_20261030.zip`、`SHA256SUMS.txt` |
 
 - **全版** `pdNNN_vNNN.bin`：补齐到 `0x1B200`（111,104 B）；`0x18000` 起为 160×40 RGB565 启动图窗口。
 - **简洁版** `pdNNN_vNNN_compact.bin`：代码 + 0xFF 补齐到 8 字节；不覆盖 `0x08018000` 启动图区。
-- **读取工具包** `BlackBoxReader_<日期>.zip`：包含 `blackbox_reader.py`、`run_gui.bat`、`requirements.txt`、`README.md`；两个 Release 可共用同一个包。
+- **读取工具包** `BlackBoxReader_20261030.zip`：包含 `blackbox_reader.py`、`run_gui.bat`、`requirements.txt`、`README.md`、`LICENSE`；统一 Release 同时提供两款固件和工具。
 
 tag 本身不能挂附件，需要基于 tag 创建 GitHub Release 后上传；同时让 tag 指向 master 发布提交。仓库不提交 `build/` 和 bin 产物。发布时可再附一份 `SHA256SUMS.txt`，方便核对下载文件。
 
